@@ -2,8 +2,8 @@ import pandas as pd
 import os
 
 FISIERE = {
-    "iunie 2025":  "../1.surse_date/SES1.xlsx",
-    "august 2025": "../1.surse_date/SES2.xlsx",
+    "iunie_2025":     "../1.surse_date/SES1.xlsx",
+    "sesiunea2_2025": "../1.surse_date/SES2.xlsx",
 }
 
 frames = []
@@ -164,4 +164,175 @@ print(f"exam_results: {len(results)} inregistrari")
 restantieri = results.groupby("candidate_id")["exam_session"].count()
 print(f"  candidati in ambele sesiuni: {len(restantieri[restantieri > 1])}")
 
+import sqlite3
+import math
 
+
+def val_to_sql(val):
+    if val is None:
+        return "NULL"
+    if isinstance(val, float) and math.isnan(val):
+        return "NULL"
+    try:
+        if pd.isna(val):
+            return "NULL"
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, bool):
+        return "1" if val else "0"
+    if isinstance(val, int):
+        return str(val)
+    if isinstance(val, float):
+        if val.is_integer():
+            return str(int(val))
+        return repr(val)
+    s = str(val)
+    s = s.replace('“', '"').replace('”', '"').replace('„', '"')
+    s = s.replace('‘', "'").replace('’', "'")
+    s = s.replace("'", "''")
+    return f"'{s}'"
+
+
+SCHEMA_SQL = """PRAGMA foreign_keys = ON;
+
+BEGIN TRANSACTION;
+
+CREATE TABLE IF NOT EXISTS schools (
+    school_id      INTEGER PRIMARY KEY,
+    siiir_code     TEXT NOT NULL UNIQUE,
+    sirues_code    TEXT,
+    residency_area TEXT
+);
+
+CREATE TABLE IF NOT EXISTS specializations (
+    specialization_id   INTEGER PRIMARY KEY,
+    specialization_name TEXT,
+    profile             TEXT,
+    track               TEXT
+);
+
+CREATE TABLE IF NOT EXISTS exam_subjects (
+    subject_id   INTEGER PRIMARY KEY,
+    exam_code    TEXT NOT NULL,
+    subject_name TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS candidates (
+    candidate_id      INTEGER PRIMARY KEY,
+    sex               TEXT,
+    education_form    TEXT,
+    class             TEXT,
+    promotion_year    TEXT,
+    modern_language   TEXT,
+    school_id         INTEGER,
+    specialization_id INTEGER,
+    FOREIGN KEY (school_id)         REFERENCES schools(school_id),
+    FOREIGN KEY (specialization_id) REFERENCES specializations(specialization_id)
+);
+
+CREATE TABLE IF NOT EXISTS exam_results (
+    exam_result_id   INTEGER PRIMARY KEY,
+    candidate_id     INTEGER NOT NULL,
+    subject_ea_id    INTEGER,
+    subject_eb_id    INTEGER,
+    subject_ec_id    INTEGER,
+    subject_ed_id    INTEGER,
+    exam_session     TEXT,
+    grade_ea         REAL,
+    grade_eb         REAL,
+    grade_ec         REAL,
+    grade_ed         REAL,
+    status_ea        TEXT,
+    status_eb        TEXT,
+    status_ec        TEXT,
+    status_ed        TEXT,
+    contest_ea       TEXT,
+    contest_grade_ea REAL,
+    contest_eb       TEXT,
+    contest_grade_eb REAL,
+    contest_ec       TEXT,
+    contest_grade_ec REAL,
+    contest_ed       TEXT,
+    contest_grade_ed REAL,
+    digital_score    INTEGER,
+    final_average    REAL,
+    final_status     TEXT,
+    FOREIGN KEY (candidate_id)  REFERENCES candidates(candidate_id),
+    FOREIGN KEY (subject_ea_id) REFERENCES exam_subjects(subject_id),
+    FOREIGN KEY (subject_eb_id) REFERENCES exam_subjects(subject_id),
+    FOREIGN KEY (subject_ec_id) REFERENCES exam_subjects(subject_id),
+    FOREIGN KEY (subject_ed_id) REFERENCES exam_subjects(subject_id)
+);
+
+"""
+
+
+def genereaza_inserts(df, table_name, batch_size=500):
+    if df is None or len(df) == 0:
+        return ""
+
+    cols = list(df.columns)
+    cols_sql = ", ".join(cols)
+    parts = []
+    rows = df.to_dict(orient="records")
+
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start:start + batch_size]
+        values_lines = []
+        for r in batch:
+            vals = [val_to_sql(r[c]) for c in cols]
+            values_lines.append("  (" + ", ".join(vals) + ")")
+        parts.append(
+            f"INSERT INTO {table_name} ({cols_sql}) VALUES\n"
+            + ",\n".join(values_lines)
+            + ";\n"
+        )
+
+    return "\n".join(parts) + "\n"
+
+
+def scrie_sql(schools, specializations, exam_subjects, candidates, exam_results, output_path):
+    folder = os.path.dirname(output_path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    parts = [SCHEMA_SQL]
+    parts.append(genereaza_inserts(schools, "schools"))
+    parts.append(genereaza_inserts(specializations, "specializations"))
+    parts.append(genereaza_inserts(exam_subjects, "exam_subjects"))
+    parts.append(genereaza_inserts(candidates, "candidates"))
+    parts.append(genereaza_inserts(exam_results, "exam_results"))
+    parts.append("COMMIT;\n")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
+
+    print(f"SQL generat: {output_path} ({os.path.getsize(output_path):,} bytes)")
+
+
+def creeaza_baza_date(sql_path, db_path):
+    folder = os.path.dirname(db_path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    with open(sql_path, "r", encoding="utf-8") as f:
+        script = f.read()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(script)
+        conn.commit()
+    finally:
+        conn.close()
+
+    print(f"Baza de date creata: {db_path} ({os.path.getsize(db_path):,} bytes)")
+
+
+scrie_sql(schools, specializations, exam_subjects, candidates, results,
+          "../3.script_sqlLite/bac_rezultate_2025.sql")
+
+creeaza_baza_date("../3.script_sqlLite/bac_rezultate_2025.sql",
+                  "../5.BD_SQLite/bac_rezultate_2025.db")
